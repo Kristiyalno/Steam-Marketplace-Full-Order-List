@@ -1,0 +1,420 @@
+(() => {
+  "use strict";
+
+  const SELL_KEY = "rgCompactSellOrders";
+  const BUY_KEY  = "rgCompactBuyOrders";
+
+  // ── Data extraction ─────────────────────────────────────────────────────────
+
+  function findCompactOrders(rawText, key) {
+    const idx = rawText.indexOf(key);
+    if (idx === -1) return null;
+    const bracketStart = rawText.indexOf("[", idx);
+    if (bracketStart === -1) return null;
+    let depth = 0, bracketEnd = -1;
+    for (let i = bracketStart; i < rawText.length; i++) {
+      const ch = rawText[i];
+      if (ch === "[") depth++;
+      else if (ch === "]") { if (--depth === 0) { bracketEnd = i; break; } }
+    }
+    if (bracketEnd === -1) return null;
+    const numbers = (rawText.slice(bracketStart + 1, bracketEnd).match(/-?\d+/g) || []).map(Number);
+    if (numbers.length % 2 !== 0) numbers.pop();
+    return numbers;
+  }
+
+  /**
+   * Collapse duplicate price levels and sort.
+   *
+   * Sell orders read cheapest first, buy orders read highest first, which is
+   * how Steam prints its own rows on each side. `descending` is set for buy.
+   *
+   * @param {number[]} numbers      flat [price, qty, price, qty, ...] in cents
+   * @param {boolean}  descending   true for buy orders
+   * @returns {Array<[number, number]>}
+   */
+  function aggregatePairs(numbers, descending) {
+    const totals = new Map();
+    for (let i = 0; i < numbers.length; i += 2) {
+      const price = numbers[i], qty = numbers[i + 1];
+      totals.set(price, (totals.get(price) || 0) + qty);
+    }
+    const pairs = [...totals.entries()];
+    pairs.sort((a, b) => (descending ? b[0] - a[0] : a[0] - b[0]));
+    return pairs;
+  }
+
+  function extractOrders(key) {
+    const numbers = findCompactOrders(document.documentElement.outerHTML, key);
+    if (!numbers || numbers.length === 0) return null;
+    return aggregatePairs(numbers, key === BUY_KEY);
+  }
+
+  // ── Money parsing / formatting ───────────────────────────────────────────────
+
+  /**
+   * Read a price out of a cell like "$0.12", "0,12€", "1.234,56 €" or
+   * "$0.18 or more" and return it in cents.
+   *
+   * @param {string} text
+   * @returns {number|null}
+   */
+  function parsePriceCents(text) {
+    const match = text.match(/\d[\d.,\u00a0\s]*/);
+    if (!match) return null;
+    const raw = match[0].replace(/[\u00a0\s]/g, "");
+    const lastComma = raw.lastIndexOf(",");
+    const lastDot   = raw.lastIndexOf(".");
+    const sepPos    = Math.max(lastComma, lastDot);
+
+    let intDigits  = raw.replace(/\D/g, "");
+    let fracDigits = "00";
+
+    if (sepPos !== -1) {
+      const frac = raw.slice(sepPos + 1).replace(/\D/g, "");
+      // 1-2 trailing digits means a decimal separator, 3 means thousands.
+      if (frac.length > 0 && frac.length <= 2) {
+        intDigits  = raw.slice(0, sepPos).replace(/\D/g, "");
+        fracDigits = frac.padEnd(2, "0");
+      }
+    }
+
+    const cents = parseInt(intDigits || "0", 10) * 100 + parseInt(fracDigits || "0", 10);
+    return isNaN(cents) ? null : cents;
+  }
+
+  /**
+   * Build a formatter that mirrors whatever Steam already prints in this
+   * table, so totals don't show "$" to someone browsing in euros.
+   *
+   * @param {string|null} sampleText  text of a native price cell
+   * @returns {(cents: number) => string}
+   */
+  function makeMoneyFormatter(sampleText) {
+    let prefix = "", suffix = "", decimal = ".", group = ",";
+
+    if (sampleText) {
+      const match = sampleText.match(/^([^\d]*)(\d[\d.,\u00a0\s]*\d|\d)([^\d]*)$/);
+      if (match) {
+        prefix = match[1];
+        suffix = match[3];
+        if (/,\d{1,2}$/.test(match[2])) { decimal = ","; group = "."; }
+      }
+    }
+
+    return function formatMoney(cents) {
+      const negative = cents < 0;
+      const abs      = Math.abs(cents);
+      const whole    = String(Math.floor(abs / 100));
+      const frac     = String(abs % 100).padStart(2, "0");
+      const grouped  = whole.replace(/\B(?=(\d{3})+(?!\d))/g, group);
+      return (negative ? "-" : "") + prefix + grouped + decimal + frac + suffix;
+    };
+  }
+
+  // ── Table detection ──────────────────────────────────────────────────────────
+
+  function findOrderTables() {
+    return Array.from(document.querySelectorAll("table")).filter(table => {
+      const cells = table.querySelectorAll("thead th, thead td");
+      const text  = Array.from(cells).map(c => c.textContent.trim().toLowerCase()).join("|");
+      return text.includes("price") && text.includes("quantity");
+    });
+  }
+
+  function classifyTable(table, index) {
+    let node = table;
+    for (let hops = 0; hops < 4 && node; hops++) {
+      const text = (node.textContent || "").toLowerCase();
+      if (text.includes("for sale starting at")) return "sell";
+      if (text.includes("requests to buy"))      return "buy";
+      node = node.parentElement;
+    }
+    return index === 0 ? "sell" : "buy";
+  }
+
+  function findCollapsedRow(table) {
+    const rows = table.querySelectorAll("tbody tr");
+    if (rows.length === 0) return null;
+    const last = rows[rows.length - 1];
+    const priceCell = last.querySelector("td");
+    if (!priceCell) return null;
+    const text = priceCell.textContent.toLowerCase();
+    return (text.includes("or more") || text.includes("or lower") || text.includes("or less")) ? last : null;
+  }
+
+  // ── UI helpers ───────────────────────────────────────────────────────────────
+
+  /** Native (Steam-rendered) data rows, excluding anything this script added. */
+  function nativeDataRows(table) {
+    return Array.from(table.querySelectorAll("tbody tr")).filter(
+      r => !r.classList.contains("smot-extra-row") &&
+           !r.classList.contains("smot-sum-row") &&
+           !r.classList.contains("smot-status-row") &&
+           !r.classList.contains("smot-collapsed-row")
+    );
+  }
+
+  /** Text of the first native price cell, used as a currency sample. */
+  function samplePriceText(table) {
+    for (const row of nativeDataRows(table)) {
+      const cell = row.querySelector("td");
+      if (cell && /\d/.test(cell.textContent)) return cell.textContent.trim();
+    }
+    return null;
+  }
+
+  /**
+   * Clone the cell structure from an existing native data row so injected rows
+   * use exactly the same elements, classes, and CSS variables Steam applied.
+   * This is what keeps font sizes identical without knowing any hashed class
+   * names, and the total row now goes through it too.
+   *
+   * @param {HTMLTableElement} table
+   * @param {string} priceText
+   * @param {string} qtyText
+   * @param {string[]} extraClasses  extra CSS classes on the <tr>
+   * @returns {HTMLTableRowElement}
+   */
+  function makeRow(table, priceText, qtyText, extraClasses = []) {
+    const nativeRows = nativeDataRows(table);
+
+    if (nativeRows.length > 0) {
+      const template = nativeRows[0];
+      const tr = document.createElement("tr");
+      extraClasses.forEach(c => tr.classList.add(c));
+
+      const cells  = template.querySelectorAll("td");
+      const values = [priceText, qtyText];
+      cells.forEach((cell, i) => {
+        const td = cell.cloneNode(true);
+        // Update only the text content inside, keeping all nested elements.
+        const inner = td.querySelector("span") || td;
+        inner.textContent = values[i] ?? "";
+        tr.appendChild(td);
+      });
+      return tr;
+    }
+
+    // Fallback: plain row (no native template available yet).
+    const tr = document.createElement("tr");
+    extraClasses.forEach(c => tr.classList.add(c));
+    [priceText, qtyText].forEach(val => {
+      const td = document.createElement("td");
+      td.textContent = val;
+      tr.appendChild(td);
+    });
+    return tr;
+  }
+
+  /**
+   * Freeze the table at its collapsed rendered size before any rows are added,
+   * so injected content can never reflow the columns or push the table wider.
+   *
+   * @param {HTMLTableElement} table
+   */
+  function pinTableLayout(table) {
+    if (table.dataset.smotPinned) return;
+
+    const headerCells = Array.from(table.querySelectorAll("thead th"));
+    if (headerCells.length === 0) return;
+
+    const tableWidth = table.getBoundingClientRect().width;
+    if (!tableWidth) return;
+
+    const widths = headerCells.map(th => th.getBoundingClientRect().width);
+    if (widths.some(w => !w)) return;
+
+    table.style.width       = tableWidth + "px";
+    table.style.maxWidth    = "100%";
+    table.style.tableLayout = "fixed";
+    // Percentages rather than pixels, so the columns keep their proportions
+    // if the container ever gets narrower than the width we measured.
+    headerCells.forEach((th, i) => {
+      th.style.width = (widths[i] / tableWidth * 100).toFixed(4) + "%";
+    });
+
+    table.dataset.smotPinned = "1";
+  }
+
+  /**
+   * Compute total value (price × qty, summed) across all pairs.
+   * Returns { totalCents, totalQty }.
+   */
+  function computeTotal(pairs) {
+    let totalCents = 0, totalQty = 0;
+    for (const [priceCents, qty] of pairs) {
+      totalCents += priceCents * qty;
+      totalQty   += qty;
+    }
+    return { totalCents, totalQty };
+  }
+
+  function getShownPrices(table, collapsedRow) {
+    const shown = new Set();
+    const originalTbody = table.querySelector("tbody");
+    if (!originalTbody) return shown;
+    for (const row of originalTbody.querySelectorAll("tr")) {
+      if (row === collapsedRow) continue;
+      const cell = row.querySelector("td");
+      if (!cell) continue;
+      const cents = parsePriceCents(cell.textContent);
+      if (cents !== null) shown.add(cents);
+    }
+    return shown;
+  }
+
+  function renderExpandedRows(table, extraTbody, pairs, alreadyShownPrices, formatMoney) {
+    // Remove old injected rows (but keep the status row at index 0).
+    Array.from(extraTbody.querySelectorAll(".smot-extra-row, .smot-sum-row"))
+      .forEach(r => r.remove());
+
+    const frag = document.createDocumentFragment();
+
+    // Data rows.
+    for (const [priceCents, qty] of pairs) {
+      if (alreadyShownPrices.has(priceCents)) continue;
+      frag.appendChild(makeRow(table, formatMoney(priceCents), String(qty), ["smot-extra-row"]));
+    }
+
+    // Sum row, built from the same native template as every other row. The
+    // value sits in the price column and the count in the quantity column;
+    // the rule above it and the accent colour are what mark it as the total.
+    const { totalCents, totalQty } = computeTotal(pairs);
+    const sumRow = makeRow(table, formatMoney(totalCents), String(totalQty), ["smot-sum-row"]);
+    sumRow.title = "Total across all " + totalQty + " orders";
+    frag.appendChild(sumRow);
+
+    extraTbody.appendChild(frag);
+  }
+
+  // ── Wiring ───────────────────────────────────────────────────────────────────
+
+  function wireCollapsedRow(table, collapsedRow, key) {
+    if (collapsedRow.dataset.smotWired) return;
+    collapsedRow.dataset.smotWired = "1";
+    collapsedRow.classList.add("smot-collapsed-row");
+
+    const priceCell    = collapsedRow.querySelector("td");
+    const originalText = priceCell.textContent;
+    const formatMoney  = makeMoneyFormatter(samplePriceText(table));
+
+    // The collapsed row's quantity is the sum of everything hidden behind it.
+    // Once those orders are listed one by one it reads as a duplicate, so it
+    // is blanked while expanded and put back on collapse.
+    const collapsedQtyCell = collapsedRow.querySelectorAll("td")[1] || null;
+    const collapsedQtyTarget = collapsedQtyCell
+      ? (collapsedQtyCell.querySelector("span") || collapsedQtyCell)
+      : null;
+    const collapsedQtyText = collapsedQtyTarget ? collapsedQtyTarget.textContent : "";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "smot-expand-btn";
+    button.textContent = originalText + " \u25BC";
+    button.setAttribute("aria-expanded", "false");
+
+    // Match the font size of native cell text. Native rows put text inside a
+    // <span> whose font-size comes from a hashed CSS class we can't predict.
+    const nativeSpan = (() => {
+      for (const row of table.querySelectorAll("tbody tr")) {
+        if (row === collapsedRow) continue;
+        const span = row.querySelector("td span");
+        if (span) return span;
+      }
+      return null;
+    })();
+    if (nativeSpan) {
+      const fs = getComputedStyle(nativeSpan).fontSize;
+      if (fs) button.style.fontSize = fs;
+    }
+
+    priceCell.textContent = "";
+    priceCell.appendChild(button);
+
+    const extraTbody = document.createElement("tbody");
+    extraTbody.className = "smot-extra-tbody";
+    extraTbody.hidden = true;
+    table.appendChild(extraTbody);
+
+    const statusRow = document.createElement("tr");
+    statusRow.className = "smot-status-row";
+    statusRow.hidden = true;
+    const statusCell = document.createElement("td");
+    statusCell.colSpan = 2;
+    statusCell.className = "smot-status-cell";
+    statusRow.appendChild(statusCell);
+    extraTbody.appendChild(statusRow);
+
+    let expanded = false;
+
+    button.addEventListener("click", () => {
+      expanded = !expanded;
+
+      if (expanded) {
+        // Measure and lock the collapsed size first, then fill the table.
+        pinTableLayout(table);
+
+        button.textContent = originalText + " \u25B2";
+        button.setAttribute("aria-expanded", "true");
+        extraTbody.hidden = false;
+
+        const pairs = extractOrders(key);
+        if (!pairs) {
+          statusRow.hidden = false;
+          statusCell.textContent = "Couldn't find the full order list on this page.";
+          return;
+        }
+        statusRow.hidden = true;
+        const shown = getShownPrices(table, collapsedRow);
+        renderExpandedRows(table, extraTbody, pairs, shown, formatMoney);
+        if (collapsedQtyTarget) collapsedQtyTarget.textContent = "";
+      } else {
+        button.textContent = originalText + " \u25BC";
+        button.setAttribute("aria-expanded", "false");
+        extraTbody.hidden = true;
+        if (collapsedQtyTarget) collapsedQtyTarget.textContent = collapsedQtyText;
+      }
+    });
+  }
+
+  function setupTable(table, kind) {
+    // No "already checked" flag on the table itself: Steam can render the
+    // table before the rows land, and marking it here would mean never
+    // wiring it once they do. The per-row smotWired flag is the real guard.
+    const collapsedRow = findCollapsedRow(table);
+    if (!collapsedRow || collapsedRow.dataset.smotWired) return;
+
+    const key = kind === "sell" ? SELL_KEY : BUY_KEY;
+    wireCollapsedRow(table, collapsedRow, key);
+  }
+
+  function scanTables() {
+    const tables = findOrderTables();
+    tables.forEach((table, index) => setupTable(table, classifyTable(table, index)));
+  }
+
+  function init() {
+    scanTables();
+
+    // The market page mutates constantly (and our own rows mutate it too),
+    // so coalesce bursts into one scan per frame instead of scanning the
+    // whole document on every single mutation record.
+    let queued = false;
+    const observer = new MutationObserver(() => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        scanTables();
+      });
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();

@@ -1,0 +1,46 @@
+/* Expand button — inherits font from the table cell it lives in.
+   Padding is kept tight so the button doesn't widen the price column. */
+.smot-expand-btn {
+  background: transparent;
+  border: 1px solid var(--color-accent-8, #67c1f5);
+  color: var(--color-accent-8, #67c1f5);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-family: inherit;
+  font-weight: 600;
+  line-height: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.smot-expand-btn:hover {
+  background: var(--color-accent-8, #67c1f5);
+  color: var(--color-dull-12, #171a21);
+}
+
+/* Extra rows fade slightly to signal they're not the native rows */
+.smot-extra-row td {
+  opacity: 0.85;
+}
+
+/* Sum row — the cells are cloned from a native row, so the text lives inside
+   Steam's own <span>. Styling has to reach that span as well as the <td>,
+   otherwise the span's own class wins and the row looks unstyled. */
+.smot-sum-row td,
+.smot-sum-row td span {
+  font-weight: 600;
+  opacity: 1;
+  color: var(--color-accent-8, #67c1f5);
+  --text-color: var(--color-accent-8, #67c1f5);
+}
+
+.smot-sum-row td {
+  border-top: 1px solid var(--color-accent-8, #67c1f5);
+  padding-top: 4px;
+}
+
+.smot-status-row td {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--color-text-body-note, #8f98a0);
+}
