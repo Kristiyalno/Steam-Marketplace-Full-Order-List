@@ -87,11 +87,20 @@
    * Same-origin GET, no new permissions: it's the page the user is already
    * on. Used to keep numbers current after the initial page load.
    *
+   * `cache: "no-store"` only governs the browser's own HTTP cache — it does
+   * nothing about a CDN or edge cache sitting in front of Steam, which will
+   * happily keep serving one cached snapshot to a plain repeated GET. A
+   * throwaway query param makes every request look like a different URL so
+   * that layer can't dedupe it against what it already has cached.
+   *
    * @param {string} key
    * @returns {Promise<Array<[number, number]>|null>}
    */
   async function fetchFreshOrders(key) {
-    const response = await fetch(location.href, {
+    const url = new URL(location.href);
+    url.searchParams.set("smot_ts", Date.now().toString());
+
+    const response = await fetch(url.toString(), {
       credentials: "include",
       cache: "no-store",
     });
