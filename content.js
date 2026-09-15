@@ -516,8 +516,23 @@
         button.textContent = originalText + " \u25B2";
         button.setAttribute("aria-expanded", "true");
         extraTbody.hidden = false;
+        statusRow.hidden = false;
+        refreshRow.hidden = true;
+        statusCell.textContent = "Loading\u2026";
 
-        const pairs = extractOrders(key);
+        // Always fetch on expand rather than trusting whatever's currently
+        // parsed out of the DOM. Steam's market navigates between listings
+        // without a full page reload, so the DOM can still be showing a
+        // previous item's embedded order data for a moment after switching
+        // listings — a fresh fetch is keyed to the current URL and can't be
+        // stale in that way. Falls back to the DOM parse only if the fetch
+        // itself fails (e.g. offline).
+        let pairs = await fetchFreshOrders(key);
+        if (!pairs) pairs = extractOrders(key);
+
+        // The user may have collapsed the row again while this awaited.
+        if (!expanded) return;
+
         if (!pairs) {
           statusRow.hidden = false;
           statusCell.textContent = "Couldn't find the full order list on this page.";
