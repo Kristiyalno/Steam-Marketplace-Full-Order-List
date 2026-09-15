@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Full Order List settings</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      width: 220px;
+      padding: 14px;
+      background: #171a21;
+      color: #c6d4df;
+      font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+      font-size: 13px;
+    }
+    h1 {
+      font-size: 13px;
+      font-weight: 600;
+      margin: 0 0 12px;
+      color: #ffffff;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      color: #8f98a0;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    input[type="number"] {
+      width: 64px;
+      background: #202632;
+      border: 1px solid #3a4351;
+      border-radius: 3px;
+      color: #c6d4df;
+      padding: 4px 6px;
+      font-size: 13px;
+    }
+    input[type="number"]:focus {
+      outline: 1px solid #67c1f5;
+    }
+    .unit { color: #8f98a0; }
+    .hint {
+      margin-top: 10px;
+      font-size: 11px;
+      color: #6b7480;
+      line-height: 1.4;
+    }
+    .saved {
+      margin-top: 8px;
+      font-size: 11px;
+      color: #67c1f5;
+      height: 14px;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .saved.visible { opacity: 1; }
+  </style>
+</head>
+<body>
+  <h1>Full Order List</h1>
+  <label for="interval">Auto-refresh interval</label>
+  <div class="row">
+    <input type="number" id="interval" min="10" max="600" step="5">
+    <span class="unit">seconds</span>
+  </div>
+  <div class="hint">
+    Only refreshes while an order table is expanded. Set to 0 to disable
+    auto-refresh (the manual refresh button still works).
+  </div>
+  <div class="saved" id="saved">Saved</div>
+  <script src="popup.js"></script>
+</body>
+</html>

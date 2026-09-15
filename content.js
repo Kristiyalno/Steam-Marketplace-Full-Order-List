@@ -4,6 +4,34 @@
   const SELL_KEY = "rgCompactSellOrders";
   const BUY_KEY  = "rgCompactBuyOrders";
 
+  const REFRESH_STORAGE_KEY = "smotRefreshIntervalSeconds";
+  const DEFAULT_REFRESH_SECONDS = 40;
+
+  // Live registry of every expanded table's refresh timer, so a setting
+  // change from the popup can immediately re-arm all of them without a
+  // page reload.
+  const refreshHandles = new Set();
+
+  function getRefreshIntervalSeconds() {
+    return new Promise((resolve) => {
+      if (!(chrome && chrome.storage && chrome.storage.sync)) {
+        resolve(DEFAULT_REFRESH_SECONDS);
+        return;
+      }
+      chrome.storage.sync.get({ [REFRESH_STORAGE_KEY]: DEFAULT_REFRESH_SECONDS }, (items) => {
+        resolve(items[REFRESH_STORAGE_KEY]);
+      });
+    });
+  }
+
+  if (chrome && chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "sync" || !changes[REFRESH_STORAGE_KEY]) return;
+      const seconds = changes[REFRESH_STORAGE_KEY].newValue;
+      refreshHandles.forEach((handle) => handle.rearm(seconds));
+    });
+  }
+
   // ── Data extraction ─────────────────────────────────────────────────────────
 
   function findCompactOrders(rawText, key) {
@@ -44,10 +72,32 @@
     return pairs;
   }
 
-  function extractOrders(key) {
-    const numbers = findCompactOrders(document.documentElement.outerHTML, key);
+  function extractOrdersFromText(rawText, key) {
+    const numbers = findCompactOrders(rawText, key);
     if (!numbers || numbers.length === 0) return null;
     return aggregatePairs(numbers, key === BUY_KEY);
+  }
+
+  function extractOrders(key) {
+    return extractOrdersFromText(document.documentElement.outerHTML, key);
+  }
+
+  /**
+   * Re-fetch this same listing page and pull fresh order data out of it.
+   * Same-origin GET, no new permissions: it's the page the user is already
+   * on. Used to keep numbers current after the initial page load.
+   *
+   * @param {string} key
+   * @returns {Promise<Array<[number, number]>|null>}
+   */
+  async function fetchFreshOrders(key) {
+    const response = await fetch(location.href, {
+      credentials: "include",
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const html = await response.text();
+    return extractOrdersFromText(html, key);
   }
 
   // ── Money parsing / formatting ───────────────────────────────────────────────
@@ -151,6 +201,7 @@
       r => !r.classList.contains("smot-extra-row") &&
            !r.classList.contains("smot-sum-row") &&
            !r.classList.contains("smot-status-row") &&
+           !r.classList.contains("smot-refresh-row") &&
            !r.classList.contains("smot-collapsed-row")
     );
   }
@@ -346,9 +397,107 @@
     statusRow.appendChild(statusCell);
     extraTbody.appendChild(statusRow);
 
+    // Refresh row: a small manual refresh button plus a "last updated" note.
+    // Lives above the sum row so it reads as metadata about the list, not
+    // part of it.
+    const refreshRow = document.createElement("tr");
+    refreshRow.className = "smot-refresh-row";
+    refreshRow.hidden = true;
+    const refreshCell = document.createElement("td");
+    refreshCell.colSpan = 2;
+    refreshCell.className = "smot-refresh-cell";
+
+    const refreshButton = document.createElement("button");
+    refreshButton.type = "button";
+    refreshButton.className = "smot-refresh-btn";
+    refreshButton.title = "Refresh now";
+    refreshButton.setAttribute("aria-label", "Refresh order list");
+    refreshButton.textContent = "\u21bb";
+
+    const refreshNote = document.createElement("span");
+    refreshNote.className = "smot-refresh-note";
+
+    refreshCell.appendChild(refreshButton);
+    refreshCell.appendChild(refreshNote);
+    refreshRow.appendChild(refreshCell);
+    extraTbody.appendChild(refreshRow);
+
+    function setRefreshNote(text) {
+      refreshNote.textContent = text;
+    }
+
+    function formatUpdatedAt(date) {
+      const hh = String(date.getHours()).padStart(2, "0");
+      const mm = String(date.getMinutes()).padStart(2, "0");
+      const ss = String(date.getSeconds()).padStart(2, "0");
+      return "Updated " + hh + ":" + mm + ":" + ss;
+    }
+
+    /**
+     * Parse `pairs`, re-render the rows, and refresh the "shown" set against
+     * the native rows as they currently stand. Shared by the initial expand
+     * and by every refresh tick so they can't drift apart.
+     */
+    function applyPairs(pairs) {
+      const shown = getShownPrices(table, collapsedRow);
+      renderExpandedRows(table, extraTbody, pairs, shown, formatMoney);
+      if (collapsedQtyTarget) collapsedQtyTarget.textContent = "";
+      // renderExpandedRows only clears/rebuilds the .smot-extra-row and
+      // .smot-sum-row nodes; refreshRow isn't touched by that pass, so its
+      // position in extraTbody doesn't move on its own. appendChild on a
+      // node already in the tree relocates it rather than duplicating it,
+      // so this puts refreshRow back at the end, below the fresh sum row,
+      // every time new rows are rendered.
+      extraTbody.appendChild(refreshRow);
+    }
+
+    async function refreshNow({ silent = false } = {}) {
+      if (!silent) refreshButton.disabled = true;
+      try {
+        const pairs = await fetchFreshOrders(key);
+        if (!pairs) {
+          setRefreshNote("Refresh failed");
+          return;
+        }
+        applyPairs(pairs);
+        setRefreshNote(formatUpdatedAt(new Date()));
+      } catch (err) {
+        setRefreshNote("Refresh failed");
+      } finally {
+        if (!silent) refreshButton.disabled = false;
+      }
+    }
+
+    refreshButton.addEventListener("click", () => refreshNow());
+
+    // ── Auto-refresh timer ──────────────────────────────────────────────────
+    // One timer per expanded table. Stops entirely on collapse rather than
+    // just going quiet, so a page with several expanded tables left open in
+    // a background tab isn't refetching the page repeatedly for nothing.
+    let timerId = null;
+
+    function stopTimer() {
+      if (timerId !== null) {
+        clearInterval(timerId);
+        timerId = null;
+      }
+    }
+
+    function startTimer(seconds) {
+      stopTimer();
+      if (!seconds || seconds <= 0) return;
+      timerId = setInterval(() => refreshNow({ silent: true }), seconds * 1000);
+    }
+
+    const handle = {
+      rearm(seconds) {
+        if (timerId !== null) startTimer(seconds); // only re-arm if currently running
+      },
+    };
+
     let expanded = false;
 
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       expanded = !expanded;
 
       if (expanded) {
@@ -366,14 +515,23 @@
           return;
         }
         statusRow.hidden = true;
-        const shown = getShownPrices(table, collapsedRow);
-        renderExpandedRows(table, extraTbody, pairs, shown, formatMoney);
-        if (collapsedQtyTarget) collapsedQtyTarget.textContent = "";
+        refreshRow.hidden = false;
+        applyPairs(pairs);
+        setRefreshNote(formatUpdatedAt(new Date()));
+
+        refreshHandles.add(handle);
+        const seconds = await getRefreshIntervalSeconds();
+        // The button may have been collapsed again while this await was
+        // pending; don't start a timer for a row the user already closed.
+        if (expanded) startTimer(seconds);
       } else {
         button.textContent = originalText + " \u25BC";
         button.setAttribute("aria-expanded", "false");
         extraTbody.hidden = true;
+        refreshRow.hidden = true;
         if (collapsedQtyTarget) collapsedQtyTarget.textContent = collapsedQtyText;
+        stopTimer();
+        refreshHandles.delete(handle);
       }
     });
   }

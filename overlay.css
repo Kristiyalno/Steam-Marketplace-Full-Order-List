@@ -44,3 +44,38 @@
   font-size: 11px;
   color: var(--color-text-body-note, #8f98a0);
 }
+
+/* Refresh row — sits above the sum row, deliberately quiet: a light-gray
+   icon button plus a small timestamp, neither competing with the price
+   data for attention. */
+.smot-refresh-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 2px;
+}
+
+.smot-refresh-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-text-body-note, #8f98a0);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.smot-refresh-btn:hover {
+  color: var(--color-accent-8, #67c1f5);
+}
+
+.smot-refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.smot-refresh-note {
+  font-size: 11px;
+  color: var(--color-text-body-note, #8f98a0);
+}
