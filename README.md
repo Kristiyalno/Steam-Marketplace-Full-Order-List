@@ -45,4 +45,4 @@ no background scripts, and nothing is sent anywhere.
 
 ## License
 
-Non-commercial, attribution required, share-alike. See [LICENSE](https://github.com/Kristiyalno/Steam-Marketplace-Full-Order-List/LICENSE).
+Non-commercial, attribution required, share-alike. See [LICENSE](https://github.com/Kristiyalno/Steam-Marketplace-Full-Order-List/blob/main/LICENSE).
