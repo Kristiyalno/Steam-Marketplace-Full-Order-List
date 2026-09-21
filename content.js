@@ -194,6 +194,46 @@
     return index === 0 ? "sell" : "buy";
   }
 
+  /**
+   * classifyTable's heading-text walk is a heuristic — it assumes the "for
+   * sale starting at" / "requests to buy" heading sits within a few
+   * ancestor hops of the table, which holds for Steam's actual markup but
+   * isn't guaranteed. If it guesses wrong, the wrong compact-orders key gets
+   * used and extraction silently returns nothing.
+   *
+   * This cross-checks the guess against reality: aggregate both
+   * rgCompactSellOrders and rgCompactBuyOrders and see which one's price
+   * levels actually match the table's own native rows. Falls back to the
+   * heuristic's key when neither can be verified (e.g. no native rows
+   * parsed yet) or both/neither match.
+   */
+  function resolveOrderKey(table, guessedKey) {
+    const nativePrices = new Set();
+    for (const row of nativeDataRows(table)) {
+      const cell = row.querySelector("td");
+      if (!cell) continue;
+      const cents = parsePriceCents(cell.textContent);
+      if (cents !== null) nativePrices.add(cents);
+    }
+    if (nativePrices.size === 0) return guessedKey;
+
+    function matchesNative(key) {
+      const pairs = extractOrders(key);
+      if (!pairs || pairs.length === 0) return false;
+      // Every native price should appear somewhere in this key's data.
+      return Array.from(nativePrices).every(p => pairs.some(([price]) => price === p));
+    }
+
+    const guessedMatches = matchesNative(guessedKey);
+    const otherKey = guessedKey === SELL_KEY ? BUY_KEY : SELL_KEY;
+    const otherMatches = matchesNative(otherKey);
+
+    if (guessedMatches && !otherMatches) return guessedKey;
+    if (otherMatches && !guessedMatches) return otherKey;
+    // Both matched, neither matched, or inconclusive: trust the heuristic.
+    return guessedKey;
+  }
+
   function findCollapsedRow(table) {
     const rows = nativeDataRows(table);
     if (rows.length === 0) return null;
@@ -716,7 +756,8 @@
     // row path on top of the already-wired one.
     if (table.dataset.smotTotalWired) return;
 
-    const key = kind === "sell" ? SELL_KEY : BUY_KEY;
+    const guessedKey = kind === "sell" ? SELL_KEY : BUY_KEY;
+    const key = resolveOrderKey(table, guessedKey);
     const collapsedRow = findCollapsedRow(table);
 
     if (collapsedRow) {
