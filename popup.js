@@ -8,8 +8,11 @@
   const saved = document.getElementById("saved");
   let savedTimer = null;
 
-  chrome.storage.sync.get({ [STORAGE_KEY]: DEFAULT_INTERVAL_SECONDS }, (items) => {
-    input.value = items[STORAGE_KEY];
+  chrome.storage.sync.get({ [STORAGE_KEY]: null }, (items) => {
+    // null (nothing saved yet) leaves the field empty so the "40" placeholder
+    // shows through, dimmed, as the default. Any explicitly saved value
+    // (including a user-chosen 40) fills the field normally.
+    input.value = items[STORAGE_KEY] === null ? "" : items[STORAGE_KEY];
   });
 
   function flashSaved() {
@@ -19,7 +22,17 @@
   }
 
   function commit() {
-    let value = parseInt(input.value, 10);
+    const raw = input.value.trim();
+
+    // Blank stays blank: don't write a concrete number into storage just
+    // because the field is empty, or the placeholder default would never
+    // show again after the first save.
+    if (raw === "") {
+      chrome.storage.sync.remove(STORAGE_KEY, flashSaved);
+      return;
+    }
+
+    let value = parseInt(raw, 10);
     if (isNaN(value) || value < 0) value = DEFAULT_INTERVAL_SECONDS;
     // 0 is allowed (disables auto-refresh); otherwise enforce the input's own range.
     if (value !== 0) value = Math.min(600, Math.max(10, value));

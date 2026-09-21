@@ -27,7 +27,9 @@
   if (chrome && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "sync" || !changes[REFRESH_STORAGE_KEY]) return;
-      const seconds = changes[REFRESH_STORAGE_KEY].newValue;
+      // newValue is undefined when the popup clears the field back to blank
+      // (storage.remove), which means "use the default", not "stop".
+      const seconds = changes[REFRESH_STORAGE_KEY].newValue ?? DEFAULT_REFRESH_SECONDS;
       refreshHandles.forEach((handle) => handle.rearm(seconds));
     });
   }

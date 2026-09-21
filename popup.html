@@ -42,6 +42,9 @@
     input[type="number"]:focus {
       outline: 1px solid #67c1f5;
     }
+    input[type="number"]::placeholder {
+      color: #5a6472;
+    }
     .unit { color: #8f98a0; }
     .hint {
       margin-top: 10px;
@@ -64,12 +67,13 @@
   <h1>Full Order List</h1>
   <label for="interval">Auto-refresh interval</label>
   <div class="row">
-    <input type="number" id="interval" min="10" max="600" step="5">
+    <input type="number" id="interval" min="10" max="600" step="5" placeholder="40">
     <span class="unit">seconds</span>
   </div>
   <div class="hint">
-    Only refreshes while an order table is expanded. Set to 0 to disable
-    auto-refresh (the manual refresh button still works).
+    Keeps the total (and, while expanded, the full order list) up to date in
+    the background. Leave blank to use the default shown above. Set to 0 to
+    disable auto-refresh (the manual refresh button still works).
   </div>
   <div class="saved" id="saved">Saved</div>
   <script src="popup.js"></script>
