@@ -193,7 +193,7 @@
   }
 
   function findCollapsedRow(table) {
-    const rows = table.querySelectorAll("tbody tr");
+    const rows = nativeDataRows(table);
     if (rows.length === 0) return null;
     const last = rows[rows.length - 1];
     const priceCell = last.querySelector("td");
@@ -399,6 +399,11 @@
     if (collapsedRow.dataset.smotWired) return;
     collapsedRow.dataset.smotWired = "1";
     collapsedRow.classList.add("smot-collapsed-row");
+    // Marks the table as handled via the expand flow, so a later scan can't
+    // mistake it for a no-collapsed-row table once this row (now carrying
+    // smot-collapsed-row / an injected button) stops matching
+    // findCollapsedRow's "or more" text check.
+    table.dataset.smotTotalWired = "1";
 
     const priceCell    = collapsedRow.querySelector("td");
     const originalText = priceCell.textContent;
@@ -625,15 +630,20 @@
   }
 
   function setupTable(table, kind) {
-    // No "already checked" flag on the table itself: Steam can render the
-    // table before the rows land, and marking it here would mean never
-    // wiring it once they do. The per-row/per-table smotWired flags are the
-    // real guards.
+    // No "already checked" flag on the table itself at the very start:
+    // Steam can render the table before its rows land, and marking it here
+    // would mean never wiring it once they do. But once either wiring path
+    // below has claimed the table (smotTotalWired), later scans must not
+    // re-evaluate it — the collapsed row's own markup changes once wired
+    // (button, smot-collapsed-row class) and would otherwise stop matching
+    // findCollapsedRow on a later scan, wrongly triggering the no-collapsed-
+    // row path on top of the already-wired one.
+    if (table.dataset.smotTotalWired) return;
+
     const key = kind === "sell" ? SELL_KEY : BUY_KEY;
     const collapsedRow = findCollapsedRow(table);
 
     if (collapsedRow) {
-      if (collapsedRow.dataset.smotWired) return;
       wireCollapsedRow(table, collapsedRow, key);
       return;
     }
@@ -642,7 +652,6 @@
     // fewer price levels), so there's nothing to expand. Still show the
     // always-on total row beneath what's there, without a button and
     // without waiting for a click.
-    if (table.dataset.smotTotalWired) return;
     wireStaticTotal(table, key);
   }
 
