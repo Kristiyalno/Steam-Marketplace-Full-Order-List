@@ -7,7 +7,7 @@
   const REFRESH_STORAGE_KEY = "smotRefreshIntervalSeconds";
   const DEFAULT_REFRESH_SECONDS = 40;
 
-  // Live registry of every expanded table's refresh timer, so a setting
+  // Live registry of every wired table's refresh timer, so a setting
   // change from the popup can immediately re-arm all of them without a
   // page reload.
   const refreshHandles = new Set();
@@ -362,7 +362,8 @@
    * Tables with 5 or fewer price levels have no collapsed "or more" row —
    * Steam already renders every order natively. There's nothing to expand,
    * but the total is still worth showing, so this appends a single always-
-   * visible sum row, with no button and no click required.
+   * visible sum row plus a small refresh row, with no expand button and no
+   * click required to see either.
    *
    * Fetches fresh rather than trusting the DOM at wiring time, same reason
    * as the click-to-expand flow: Steam's market can swap in a new listing's
@@ -384,15 +385,91 @@
     if (!table.isConnected) return;
 
     const formatMoney = makeMoneyFormatter(samplePriceText(table));
-    const { totalCents, totalQty } = computeTotal(pairs);
-
-    const sumRow = makeRow(table, formatMoney(totalCents), String(totalQty), ["smot-sum-row"]);
-    sumRow.title = "Total across all " + totalQty + " orders";
 
     const extraTbody = document.createElement("tbody");
     extraTbody.className = "smot-extra-tbody";
-    extraTbody.appendChild(sumRow);
     table.appendChild(extraTbody);
+
+    const sumRow = makeRow(table, "", "", ["smot-sum-row"]);
+    extraTbody.appendChild(sumRow);
+
+    const refreshRow = document.createElement("tr");
+    refreshRow.className = "smot-refresh-row";
+    const refreshCell = document.createElement("td");
+    refreshCell.colSpan = 2;
+    refreshCell.className = "smot-refresh-cell";
+
+    const refreshButton = document.createElement("button");
+    refreshButton.type = "button";
+    refreshButton.className = "smot-refresh-btn";
+    refreshButton.title = "Refresh now";
+    refreshButton.setAttribute("aria-label", "Refresh order list");
+    refreshButton.textContent = "\u21bb";
+
+    const refreshNote = document.createElement("span");
+    refreshNote.className = "smot-refresh-note";
+
+    refreshCell.appendChild(refreshButton);
+    refreshCell.appendChild(refreshNote);
+    refreshRow.appendChild(refreshCell);
+    extraTbody.appendChild(refreshRow);
+
+    function formatUpdatedAt(date) {
+      const hh = String(date.getHours()).padStart(2, "0");
+      const mm = String(date.getMinutes()).padStart(2, "0");
+      const ss = String(date.getSeconds()).padStart(2, "0");
+      return "Updated " + hh + ":" + mm + ":" + ss;
+    }
+
+    function renderTotal(p) {
+      const { totalCents, totalQty } = computeTotal(p);
+      const cells = sumRow.querySelectorAll("td");
+      const values = [formatMoney(totalCents), String(totalQty)];
+      cells.forEach((cell, i) => {
+        const inner = cell.querySelector("span") || cell;
+        inner.textContent = values[i];
+      });
+      sumRow.title = "Total across all " + totalQty + " orders";
+    }
+
+    renderTotal(pairs);
+    refreshNote.textContent = formatUpdatedAt(new Date());
+
+    async function refreshNow({ silent = false } = {}) {
+      if (!silent) refreshButton.disabled = true;
+      try {
+        const fresh = await fetchFreshOrders(key);
+        if (!fresh) {
+          refreshNote.textContent = "Refresh failed";
+          return;
+        }
+        renderTotal(fresh);
+        refreshNote.textContent = formatUpdatedAt(new Date());
+      } catch (err) {
+        refreshNote.textContent = "Refresh failed";
+      } finally {
+        if (!silent) refreshButton.disabled = false;
+      }
+    }
+
+    refreshButton.addEventListener("click", () => refreshNow());
+
+    let timerId = null;
+    function startTimer(seconds) {
+      if (timerId !== null) clearInterval(timerId);
+      timerId = null;
+      if (!seconds || seconds <= 0) return;
+      timerId = setInterval(() => refreshNow({ silent: true }), seconds * 1000);
+    }
+
+    const handle = {
+      rearm(seconds) {
+        if (timerId !== null) startTimer(seconds);
+      },
+    };
+    refreshHandles.add(handle);
+    const seconds = await getRefreshIntervalSeconds();
+    if (table.isConnected) startTimer(seconds);
   }
 
   function wireCollapsedRow(table, collapsedRow, key) {
@@ -461,10 +538,10 @@
 
     // Refresh row: a small manual refresh button plus a "last updated" note.
     // Lives above the sum row so it reads as metadata about the list, not
-    // part of it.
+    // part of it. Always visible — like the sum row, staying live is the
+    // point even while the per-price breakdown is collapsed.
     const refreshRow = document.createElement("tr");
     refreshRow.className = "smot-refresh-row";
-    refreshRow.hidden = true;
     const refreshCell = document.createElement("td");
     refreshCell.colSpan = 2;
     refreshCell.className = "smot-refresh-cell";
@@ -535,9 +612,9 @@
     refreshButton.addEventListener("click", () => refreshNow());
 
     // ── Auto-refresh timer ──────────────────────────────────────────────────
-    // One timer per expanded table. Stops entirely on collapse rather than
-    // just going quiet, so a page with several expanded tables left open in
-    // a background tab isn't refetching the page repeatedly for nothing.
+    // One timer per wired table, running for as long as the table exists on
+    // the page — not just while expanded. The total needs to stay live
+    // whether or not the user has opened the per-price breakdown.
     let timerId = null;
 
     function stopTimer() {
@@ -572,6 +649,14 @@
       // while this awaited; don't clobber whatever state it's in now.
       if (!pairs || !table.isConnected || expanded) return;
       applyPairs(pairs);
+      setRefreshNote(formatUpdatedAt(new Date()));
+
+      // Auto-refresh starts here, independent of expand state, so the
+      // total keeps itself current for as long as this table is on the
+      // page. Collapsing only hides the per-price breakdown, not this.
+      refreshHandles.add(handle);
+      const seconds = await getRefreshIntervalSeconds();
+      if (table.isConnected) startTimer(seconds);
     })();
 
     button.addEventListener("click", async () => {
@@ -584,7 +669,6 @@
         button.textContent = originalText + " \u25B2";
         button.setAttribute("aria-expanded", "true");
         statusRow.hidden = false;
-        refreshRow.hidden = true;
         statusCell.textContent = "Loading\u2026";
 
         // Always fetch on expand rather than trusting whatever's currently
@@ -606,25 +690,15 @@
           return;
         }
         statusRow.hidden = true;
-        refreshRow.hidden = false;
         applyPairs(pairs);
         setRefreshNote(formatUpdatedAt(new Date()));
-
-        refreshHandles.add(handle);
-        const seconds = await getRefreshIntervalSeconds();
-        // The button may have been collapsed again while this await was
-        // pending; don't start a timer for a row the user already closed.
-        if (expanded) startTimer(seconds);
       } else {
         button.textContent = originalText + " \u25BC";
         button.setAttribute("aria-expanded", "false");
         statusRow.hidden = true;
-        refreshRow.hidden = true;
         Array.from(extraTbody.querySelectorAll(".smot-extra-row"))
           .forEach(r => { r.hidden = true; });
         if (collapsedQtyTarget) collapsedQtyTarget.textContent = collapsedQtyText;
-        stopTimer();
-        refreshHandles.delete(handle);
       }
     });
   }
