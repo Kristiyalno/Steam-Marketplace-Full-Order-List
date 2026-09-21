@@ -324,7 +324,12 @@
     return shown;
   }
 
-  function renderExpandedRows(table, extraTbody, pairs, alreadyShownPrices, formatMoney) {
+  /**
+   * @param {boolean} rowsHidden  true while the per-price breakdown is
+   *   collapsed. The sum row itself is never hidden by this function — it's
+   *   the always-visible total — only the individual `.smot-extra-row`s are.
+   */
+  function renderExpandedRows(table, extraTbody, pairs, alreadyShownPrices, formatMoney, rowsHidden) {
     // Remove old injected rows (but keep the status row at index 0).
     Array.from(extraTbody.querySelectorAll(".smot-extra-row, .smot-sum-row"))
       .forEach(r => r.remove());
@@ -334,12 +339,15 @@
     // Data rows.
     for (const [priceCents, qty] of pairs) {
       if (alreadyShownPrices.has(priceCents)) continue;
-      frag.appendChild(makeRow(table, formatMoney(priceCents), String(qty), ["smot-extra-row"]));
+      const row = makeRow(table, formatMoney(priceCents), String(qty), ["smot-extra-row"]);
+      row.hidden = rowsHidden;
+      frag.appendChild(row);
     }
 
     // Sum row, built from the same native template as every other row. The
     // value sits in the price column and the count in the quantity column;
     // the rule above it and the accent colour are what mark it as the total.
+    // Always visible, regardless of expand state.
     const { totalCents, totalQty } = computeTotal(pairs);
     const sumRow = makeRow(table, formatMoney(totalCents), String(totalQty), ["smot-sum-row"]);
     sumRow.title = "Total across all " + totalQty + " orders";
@@ -349,6 +357,43 @@
   }
 
   // ── Wiring ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Tables with 5 or fewer price levels have no collapsed "or more" row —
+   * Steam already renders every order natively. There's nothing to expand,
+   * but the total is still worth showing, so this appends a single always-
+   * visible sum row, with no button and no click required.
+   *
+   * Fetches fresh rather than trusting the DOM at wiring time, same reason
+   * as the click-to-expand flow: Steam's market can swap in a new listing's
+   * table via SPA navigation, and this function only ever runs once per
+   * table (guarded by smotTotalWired), so if it read stale or half-rendered
+   * DOM data here it would be stuck showing a wrong total with no later
+   * chance to correct it. Falls back to the DOM parse only if the fetch
+   * itself fails (e.g. offline).
+   */
+  async function wireStaticTotal(table, key) {
+    table.dataset.smotTotalWired = "1";
+
+    let pairs = await fetchFreshOrders(key);
+    if (!pairs) pairs = extractOrders(key);
+    if (!pairs || pairs.length === 0) return;
+
+    // The table may have been torn out from under us (SPA nav swapped it
+    // for a different listing's table) while the fetch was in flight.
+    if (!table.isConnected) return;
+
+    const formatMoney = makeMoneyFormatter(samplePriceText(table));
+    const { totalCents, totalQty } = computeTotal(pairs);
+
+    const sumRow = makeRow(table, formatMoney(totalCents), String(totalQty), ["smot-sum-row"]);
+    sumRow.title = "Total across all " + totalQty + " orders";
+
+    const extraTbody = document.createElement("tbody");
+    extraTbody.className = "smot-extra-tbody";
+    extraTbody.appendChild(sumRow);
+    table.appendChild(extraTbody);
+  }
 
   function wireCollapsedRow(table, collapsedRow, key) {
     if (collapsedRow.dataset.smotWired) return;
@@ -392,9 +437,12 @@
     priceCell.textContent = "";
     priceCell.appendChild(button);
 
+    // Not hidden: the total row that lands in here needs to stay visible
+    // whether or not the full list is expanded. Only the pieces that only
+    // make sense while expanded (status/refresh rows, per-price rows) are
+    // individually hidden below.
     const extraTbody = document.createElement("tbody");
     extraTbody.className = "smot-extra-tbody";
-    extraTbody.hidden = true;
     table.appendChild(extraTbody);
 
     const statusRow = document.createElement("tr");
@@ -431,6 +479,8 @@
     refreshRow.appendChild(refreshCell);
     extraTbody.appendChild(refreshRow);
 
+    let expanded = false;
+
     function setRefreshNote(text) {
       refreshNote.textContent = text;
     }
@@ -449,8 +499,8 @@
      */
     function applyPairs(pairs) {
       const shown = getShownPrices(table, collapsedRow);
-      renderExpandedRows(table, extraTbody, pairs, shown, formatMoney);
-      if (collapsedQtyTarget) collapsedQtyTarget.textContent = "";
+      renderExpandedRows(table, extraTbody, pairs, shown, formatMoney, !expanded);
+      if (expanded && collapsedQtyTarget) collapsedQtyTarget.textContent = "";
       // renderExpandedRows only clears/rebuilds the .smot-extra-row and
       // .smot-sum-row nodes; refreshRow isn't touched by that pass, so its
       // position in extraTbody doesn't move on its own. appendChild on a
@@ -504,7 +554,20 @@
       },
     };
 
-    let expanded = false;
+    // Show the total immediately, from a fresh same-origin fetch rather
+    // than trusting the DOM at wiring time — same reasoning as the
+    // click-to-expand flow below: Steam's market can swap this table out
+    // via SPA navigation, and this only runs once, so a stale DOM read
+    // here would show a wrong total with no later correction. Falls back
+    // to the DOM parse if the fetch fails.
+    (async () => {
+      let pairs = await fetchFreshOrders(key);
+      if (!pairs) pairs = extractOrders(key);
+      // The button may already have been clicked (or the table torn out)
+      // while this awaited; don't clobber whatever state it's in now.
+      if (!pairs || !table.isConnected || expanded) return;
+      applyPairs(pairs);
+    })();
 
     button.addEventListener("click", async () => {
       expanded = !expanded;
@@ -515,7 +578,6 @@
 
         button.textContent = originalText + " \u25B2";
         button.setAttribute("aria-expanded", "true");
-        extraTbody.hidden = false;
         statusRow.hidden = false;
         refreshRow.hidden = true;
         statusCell.textContent = "Loading\u2026";
@@ -551,8 +613,10 @@
       } else {
         button.textContent = originalText + " \u25BC";
         button.setAttribute("aria-expanded", "false");
-        extraTbody.hidden = true;
+        statusRow.hidden = true;
         refreshRow.hidden = true;
+        Array.from(extraTbody.querySelectorAll(".smot-extra-row"))
+          .forEach(r => { r.hidden = true; });
         if (collapsedQtyTarget) collapsedQtyTarget.textContent = collapsedQtyText;
         stopTimer();
         refreshHandles.delete(handle);
@@ -563,12 +627,23 @@
   function setupTable(table, kind) {
     // No "already checked" flag on the table itself: Steam can render the
     // table before the rows land, and marking it here would mean never
-    // wiring it once they do. The per-row smotWired flag is the real guard.
-    const collapsedRow = findCollapsedRow(table);
-    if (!collapsedRow || collapsedRow.dataset.smotWired) return;
-
+    // wiring it once they do. The per-row/per-table smotWired flags are the
+    // real guards.
     const key = kind === "sell" ? SELL_KEY : BUY_KEY;
-    wireCollapsedRow(table, collapsedRow, key);
+    const collapsedRow = findCollapsedRow(table);
+
+    if (collapsedRow) {
+      if (collapsedRow.dataset.smotWired) return;
+      wireCollapsedRow(table, collapsedRow, key);
+      return;
+    }
+
+    // No collapsed row: every order is already rendered natively (5 or
+    // fewer price levels), so there's nothing to expand. Still show the
+    // always-on total row beneath what's there, without a button and
+    // without waiting for a click.
+    if (table.dataset.smotTotalWired) return;
+    wireStaticTotal(table, key);
   }
 
   function scanTables() {
