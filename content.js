@@ -745,23 +745,61 @@
     });
   }
 
+  // Per-table native-row counts seen on the previous scan, used only to
+  // decide when it's safe to commit to "this table has no collapsed row"
+  // (see setupTable below). A WeakMap so entries for removed tables are
+  // garbage collected automatically rather than leaking.
+  const lastSeenRowCount = new WeakMap();
+
   function setupTable(table, kind) {
     // No "already checked" flag on the table itself at the very start:
-    // Steam can render the table before its rows land, and marking it here
-    // would mean never wiring it once they do. But once either wiring path
-    // below has claimed the table (smotTotalWired), later scans must not
-    // re-evaluate it — the collapsed row's own markup changes once wired
-    // (button, smot-collapsed-row class) and would otherwise stop matching
-    // findCollapsedRow on a later scan, wrongly triggering the no-collapsed-
-    // row path on top of the already-wired one.
+    // Steam can render the table's <thead> (and an empty <tbody>) before the
+    // rows themselves land, and marking it here would mean never wiring it
+    // once they do. But once either wiring path below has claimed the table
+    // (smotTotalWired), later scans must not re-evaluate it — the collapsed
+    // row's own markup changes once wired (button, smot-collapsed-row
+    // class) and would otherwise stop matching findCollapsedRow on a later
+    // scan, wrongly triggering the no-collapsed-row path on top of the
+    // already-wired one.
     if (table.dataset.smotTotalWired) return;
+
+    const rows = nativeDataRows(table);
+    if (rows.length === 0) return;
 
     const guessedKey = kind === "sell" ? SELL_KEY : BUY_KEY;
     const key = resolveOrderKey(table, guessedKey);
     const collapsedRow = findCollapsedRow(table);
 
+    // A collapsed row is unambiguous: Steam only emits it once it has the
+    // full order list, so there's nothing to wait for here.
     if (collapsedRow) {
       wireCollapsedRow(table, collapsedRow, key);
+      return;
+    }
+
+    // No collapsed row found — but that's also exactly what a table looks
+    // like mid-population, before Steam has finished inserting all of its
+    // rows (rows can land in more than one burst, e.g. 2 now and the rest a
+    // moment later). Reaching this branch on a half-filled table would
+    // permanently misclassify it as "5 or fewer listings" via
+    // wireStaticTotal and never get another chance, since smotTotalWired
+    // locks it out of all future scans. Only commit once the row count has
+    // held steady across two consecutive scans — genuinely-small tables
+    // stay the same size scan to scan, so this costs them one extra check,
+    // while a still-filling table gets caught and re-checked instead of
+    // locked in wrong.
+    const previousCount = lastSeenRowCount.get(table);
+    lastSeenRowCount.set(table, rows.length);
+    if (previousCount !== rows.length) {
+      // The second scan that confirms stability normally comes from the
+      // MutationObserver noticing some later change anywhere on the page.
+      // But if this table's rows landed in one shot and nothing else on
+      // the page mutates afterwards, no such scan would ever happen and
+      // this table would sit unwired forever. Force one, scoped to just
+      // this table, as a backstop — scanTables() from the observer may
+      // well get there first and this becomes a harmless no-op (setupTable
+      // re-checks smotTotalWired/the row count itself either way).
+      setTimeout(() => setupTable(table, kind), 100);
       return;
     }
 
